@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"go/build"
 	"io"
 	"io/ioutil"
 	"log"
@@ -14,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"golang.org/x/tools/go/buildutil"
 )
 
 const (
@@ -66,6 +69,7 @@ var (
 	debugFlag   bool
 	emptyStruct struct{}
 	ignores     = map[string]struct{}{}
+	buildTags   []string
 )
 
 func help() {
@@ -121,6 +125,19 @@ func parseFlags() {
 	for _, v := range arr {
 		ignores[v] = emptyStruct
 	}
+
+	testFS := flag.NewFlagSet("go test", flag.ContinueOnError)
+	testFS.Var((*buildutil.TagsFlag)(&buildTags), "tags", buildutil.TagsFlagDoc)
+	testFS.Usage = func() {}
+	toParse := flag.Args()
+	for {
+		err := testFS.Parse(toParse)
+		if err == nil {
+			break
+		}
+		toParse = toParse[1:]
+	}
+	buildTags = append(buildTags, "test")
 }
 
 func main() {
@@ -219,24 +236,41 @@ func testFiles(logger *log.Logger) {
 			return filepath.SkipDir
 		}
 
-		rel = "./" + rel
+		relD := "./" + rel
 
-		if files, err := filepath.Glob(rel + "/*_test.go"); len(files) == 0 || err != nil {
+		files, err := filepath.Glob(relD + "/*_test.go")
+		if err != nil {
+			logger.Printf("Error checking for test files")
+			os.Exit(1)
+		}
 
-			if err != nil {
-				logger.Printf("Error checking for test files")
-				os.Exit(1)
-			}
-
+		if len(files) == 0 {
 			if debugFlag {
 				logger.Printf("No Go Test files in DIR:", rel, "skipping")
 			}
 
 			return nil
+		} else {
+			ok := false
+			for _, fname := range files {
+				build.Default.BuildTags = buildTags
+				m, err := build.Default.MatchFile(projectPath, fname)
+				if err != nil {
+					logger.Print("match: %s", err.Error())
+				}
+				if m {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				logger.Printf("No Go Test files in DIR:", rel, " matching build tags, skipping")
+				return nil
+			}
 		}
 
 		wg.Add(1)
-		go processDIR(logger, wg, path, rel, out)
+		go processDIR(logger, wg, path, relD, out)
 
 		return nil
 	}
